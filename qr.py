@@ -158,8 +158,8 @@ def make_qr(text):
 
     i = 0
     for right in range(size - 1, 0, -2):
-        if right == 6:
-            right = 5
+        if right <= 6:
+            right -= 1
         for vert in range(size):
             for j in range(2):
                 x = right - j
