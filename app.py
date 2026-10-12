@@ -14,7 +14,19 @@ from qr import qr_svg
 # Software khud browser mein (static/index.html) chalta hai aur offline bhi kaam
 # karta hai. Ye server sirf sabhi computers/mobile ka data sync aur safe rakhta hai.
 # ---------------------------------------------------------------------------
-app = Flask(__name__, static_folder="static", static_url_path="/static")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _web_dir():
+    # index.html "static" folder mein ho ya app.py ke saath same folder mein - dono chalega
+    for d in (os.path.join(BASE_DIR, "static"), BASE_DIR):
+        if os.path.exists(os.path.join(d, "index.html")):
+            return d
+    return BASE_DIR
+
+
+WEB_DIR = _web_dir()
+app = Flask(__name__, static_folder=None)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -59,26 +71,26 @@ init_db()
 # ------------------------------- pages --------------------------------------
 @app.route("/")
 def home():
-    resp = send_from_directory("static", "index.html")
+    resp = send_from_directory(WEB_DIR, "index.html")
     resp.headers["Cache-Control"] = "no-cache"
     return resp
 
 
 @app.route("/sw.js")
 def service_worker():
-    resp = send_from_directory("static", "sw.js", mimetype="application/javascript")
+    resp = send_from_directory(WEB_DIR, "sw.js", mimetype="application/javascript")
     resp.headers["Cache-Control"] = "no-cache"
     return resp
 
 
 @app.route("/manifest.json")
 def manifest():
-    return send_from_directory("static", "manifest.json", mimetype="application/manifest+json")
+    return send_from_directory(WEB_DIR, "manifest.json", mimetype="application/manifest+json")
 
 
 @app.route("/icon.svg")
 def icon():
-    return send_from_directory("static", "icon.svg", mimetype="image/svg+xml")
+    return send_from_directory(WEB_DIR, "icon.svg", mimetype="image/svg+xml")
 
 
 # -------------------------------- API ---------------------------------------
@@ -202,7 +214,7 @@ def _fmt_time(mins):
 
 @app.route("/book")
 def book_page():
-    resp = send_from_directory("static", "book.html")
+    resp = send_from_directory(WEB_DIR, "book.html")
     resp.headers["Cache-Control"] = "no-cache"
     return resp
 
