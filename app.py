@@ -118,6 +118,21 @@ def get_records():
     return jsonify(rows)
 
 
+def _lock(cur):
+    # ek time par ek hi write - taaki updated_at hamesha badhta rahe
+    if DATABASE_URL:
+        cur.execute("SELECT pg_advisory_xact_lock(7001)")
+    else:
+        cur.execute("BEGIN IMMEDIATE")
+
+
+def _next_ts(cur):
+    # server ki apni ghadi: kisi device ki ghadi aage-peeche ho to bhi sync nahi ruktaa
+    cur.execute("SELECT COALESCE(MAX(updated_at), 0) FROM records")
+    mx = int(cur.fetchone()[0] or 0)
+    return max(int(time.time() * 1000), mx + 1)
+
+
 @app.route("/api/records", methods=["POST"])
 def post_records():
     rows = request.get_json(force=True, silent=True) or []
@@ -125,21 +140,51 @@ def post_records():
         return jsonify({"error": "list expected"}), 400
     conn = get_db()
     cur = conn.cursor()
-    sql = (
-        "INSERT INTO records (store, id, data, updated_at) VALUES (" + ",".join([PH] * 4) + ") "
-        "ON CONFLICT (store, id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at "
-        "WHERE records.updated_at <= excluded.updated_at"
-    )
     n = 0
-    for r in rows:
-        try:
-            cur.execute(sql, (str(r["store"]), str(r["id"]), json.dumps(r["data"]), int(r["updated_at"])))
+    try:
+        _lock(cur)
+        ts = _next_ts(cur)
+        for r in rows:
+            try:
+                store, rid, data = str(r["store"]), str(r["id"]), r["data"]
+                cu = int(data.get("_u") or r.get("updated_at") or 0)
+            except (KeyError, ValueError, TypeError, AttributeError):
+                continue
+            data["_u"] = cu
+            cur.execute("SELECT data FROM records WHERE store = " + PH + " AND id = " + PH, (store, rid))
+            old = cur.fetchone()
+            if old:
+                try:
+                    ou = int(json.loads(old[0]).get("_u") or 0)
+                except (ValueError, TypeError):
+                    ou = 0
+                if cu < ou:
+                    continue  # server par isse naya version pehle se hai
+                cur.execute(
+                    "UPDATE records SET data = " + PH + ", updated_at = " + PH + " WHERE store = " + PH + " AND id = " + PH,
+                    (json.dumps(data), ts, store, rid),
+                )
+            else:
+                cur.execute(
+                    "INSERT INTO records (store, id, data, updated_at) VALUES (" + ",".join([PH] * 4) + ")",
+                    (store, rid, json.dumps(data), ts),
+                )
+            ts += 1
             n += 1
-        except (KeyError, ValueError, TypeError):
-            continue
-    conn.commit()
-    conn.close()
+        conn.commit()
+    finally:
+        conn.close()
     return jsonify({"saved": n})
+
+
+@app.route("/api/summary")
+def summary():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT store, COUNT(*), MAX(updated_at) FROM records GROUP BY store")
+    out = {r[0]: {"count": int(r[1]), "max": int(r[2])} for r in cur.fetchall()}
+    conn.close()
+    return jsonify(out)
 
 
 @app.route("/api/export")
@@ -258,10 +303,7 @@ def public_book():
     conn = get_db()
     cur = conn.cursor()
     try:
-        if DATABASE_URL:
-            cur.execute("SELECT pg_advisory_xact_lock(7001)")
-        else:
-            cur.execute("BEGIN IMMEDIATE")
+        _lock(cur)
         docs = _load(cur, "doctors")
         doc = next((d for d in docs if d.get("id") == j.get("doctorId")), None)
         if not doc or not _visits(doc, now):
@@ -275,12 +317,12 @@ def public_book():
         start = _start_minutes(doc.get("timing"))
         slot = int(doc.get("slot") or 10)
         approx = _fmt_time(start + (no - 1) * slot) if start is not None else ""
-        ts = int(time.time() * 1000)
+        ts = _next_ts(cur)
         tk = {
             "id": "tk" + secrets.token_hex(5), "date": today, "doctorId": doc["id"],
             "doctorName": doc.get("name", ""), "doctorDeg": doc.get("deg", ""), "doctorSpec": doc.get("spec", ""),
             "fee": doc.get("fee", 0), "no": no, "approx": approx, "name": name, "age": age, "sex": sex,
-            "phone": phone, "guardian": guardian, "status": "unpaid", "createdAt": ts, "src": "qr",
+            "phone": phone, "guardian": guardian, "status": "unpaid", "createdAt": int(time.time() * 1000), "src": "qr", "_u": ts,
         }
         cur.execute(
             "INSERT INTO records (store, id, data, updated_at) VALUES (" + ",".join([PH] * 4) + ")",

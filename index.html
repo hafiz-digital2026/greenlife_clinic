@@ -230,6 +230,7 @@ function seed(){
 }
 
 /* ---------- cloud sync (Supabase REST, optional) ---------- */
+let reconciledOnce=false;
 const base=()=>(S.sbUrl||'').trim().replace(/\/+$/,'');
 const cfgOK=()=>location.protocol!=='file:'||!!base();
 const pending=()=>Object.keys(M.dirty||{}).length;
@@ -241,6 +242,10 @@ async function syncNow(manual){
  if(syncing)return;syncing=true;syncMsg='Syncing…';renderStatus();let pulled=0;const newTk=[];
  try{
   if(!M.autoPushed&&location.protocol!=='file:'){SYNCED.forEach(st=>D[st].forEach(o=>{M.dirty[st+'|'+o.id]=o._u||1}));M.autoPushed=true;saveMeta()}
+  if(!reconciledOnce&&location.protocol!=='file:'){reconciledOnce=true;
+   ['users','doctors','tests'].forEach(st=>D[st].forEach(o=>{if((o._u||0)>0)M.dirty[st+'|'+o.id]=o._u}));
+   try{const r0=await sbFetch('summary');if(r0.ok){const sm=await r0.json();['bills','patients','tokens','audit'].forEach(st=>{const have=(sm[st]&&sm[st].count)||0;if(D[st].length>have)D[st].forEach(o=>{M.dirty[st+'|'+o.id]=o._u||1})})}}catch(e){}
+   saveMeta()}
   const keys=Object.keys(M.dirty);
   for(let i=0;i<keys.length;i+=100){
    const chunk=keys.slice(i,i+100),rows=[],sent={};
@@ -252,7 +257,7 @@ async function syncNow(manual){
    const r=await sbFetch('records?since='+(M.lastPull||0)+'&limit=500');
    if(!r.ok)throw new Error('Download failed ('+r.status+')');
    const rows=await r.json();if(!rows.length)break;
-   rows.forEach(row=>{const st=row.store;if(!D[st])return;const loc=D[st].find(x=>x.id===row.id);const o=row.data;o._u=row.updated_at;if(!loc||(loc._u||0)<row.updated_at){if(st==='tokens'&&!loc&&o.status==='unpaid'&&o.date===ymd()&&(o.createdAt||0)>Date.now()-15*60000)newTk.push(o);upsert(st,o);idbPut(st,o);pulled++}if(row.updated_at>(M.lastPull||0))M.lastPull=row.updated_at});
+   rows.forEach(row=>{const st=row.store;if(!D[st])return;const loc=D[st].find(x=>x.id===row.id);const o=row.data;const ru=o._u||row.updated_at;o._u=ru;if(!loc||(loc._u||0)<ru){if(st==='tokens'&&!loc&&o.status==='unpaid'&&o.date===ymd()&&(o.createdAt||0)>Date.now()-15*60000)newTk.push(o);upsert(st,o);idbPut(st,o);pulled++}if(row.updated_at>(M.lastPull||0))M.lastPull=row.updated_at});
    if(rows.length<500)break;
   }
   M.lastSync=Date.now();syncMsg='';saveMeta();
@@ -262,7 +267,7 @@ async function syncNow(manual){
   if(newTk.length&&ME&&['admin','opd'].includes(myRole())){newTk.forEach(t=>toast('🔔 New token #'+t.no+' — '+t.name+' ('+t.doctorName+')'));beep()}
   if(pulled)refreshBadge();
   if(!ME)refreshLoginUsers();else if(pulled&&(page==='dashboard'||page==='tokens'))render();
- }catch(e){syncMsg='Sync error: '+(e.message||e);if(manual)toast(syncMsg,true)}
+ }catch(e){syncMsg='Sync error: '+(e.message||e);if(manual)toast(syncMsg,true);const lw=$('lwait');if(lw&&!M.lastSync)lw.textContent='Cannot reach the server. Check internet and reload this page.'}
  finally{syncing=false;saveMeta();renderStatus()}
 }
 function renderStatus(){const el=$('status');if(!el)return;let c='ok',t;const on=navigator.onLine;
@@ -311,23 +316,34 @@ function barcode(txt){const s='*'+String(txt).toUpperCase().replace(/[^0-9A-Z\-.
 function renderLogin(){
  const us=D.users.filter(u=>u.active!==false);
  const defPin=D.users.some(u=>u.id==='u-admin'&&u.pin===hp('1234'));
+ const wait=location.protocol!=='file:'&&!M.lastSync;
  $('app').innerHTML=`<div class="login"><div class="box"><div class="lg">${logoHTML()}</div><h1>Green Life Polyclinic &amp; Diagnostic Centre</h1><p>Chanchal, Malda · Clinic Management</p>
  <label class="f">User<select id="lu">${us.map(u=>`<option value="${u.id}">${esc(u.name)} (${ROLEN[rl(u)]})</option>`).join('')}</select></label>
  <label class="f" style="margin-top:10px">PIN<input id="lp" type="password" inputmode="numeric" autocomplete="off" onkeydown="if(event.key==='Enter')doLogin()"></label>
- <div class="err" id="le"></div><button class="btn g" style="width:100%" onclick="doLogin()">Sign in</button>
+ <div class="err" id="le"></div><div class="muted" id="lwait" style="text-align:center;margin-bottom:8px">${wait?'Loading latest users from the server… please wait':''}</div><button class="btn g" id="lbtn" style="width:100%" onclick="doLogin()" ${wait?'disabled':''}>Sign in</button>
  ${defPin?'<p style="margin-top:12px">First time: Admin PIN <b>1234</b> · OPD (UMMI) PIN <b>1111</b> · Lab (LAB) PIN <b>2222</b>. Change them in Users after signing in.</p>':''}
  <p style="margin-top:14px">Management software help: <b>${HELP_PHONE}</b></p>
  ${idb?'':'<div class="err">Browser storage is blocked. Open this file in a normal (not private) window, otherwise data will be lost on closing.</div>'}
  </div></div>`;
  setTimeout(()=>{const e=$('lp');if(e)e.focus()},50);
 }
-function refreshLoginUsers(){const el=$('lu');if(!el)return;const cur=el.value;el.innerHTML=D.users.filter(u=>u.active!==false).map(u=>`<option value="${u.id}">${esc(u.name)} (${ROLEN[rl(u)]})</option>`).join('');if([...el.options].some(o=>o.value===cur))el.value=cur}
-function doLogin(){
- const u=D.users.find(x=>x.id===$('lu').value);
- if(!u||u.pin!==hp($('lp').value.trim())){$('le').textContent='Wrong PIN. Try again.';$('lp').value='';$('lp').focus();return}
+function refreshLoginUsers(){const el=$('lu');if(!el)return;const cur=el.value;el.innerHTML=D.users.filter(u=>u.active!==false).map(u=>`<option value="${u.id}">${esc(u.name)} (${ROLEN[rl(u)]})</option>`).join('');if([...el.options].some(o=>o.value===cur))el.value=cur;const lb=$('lbtn');if(lb&&M.lastSync){lb.disabled=false;const lw=$('lwait');if(lw)lw.textContent=''}}
+async function freshUsers(){
+ if(location.protocol==='file:'||!navigator.onLine||!cfgOK())return;
+ const t0=Date.now();while(syncing&&Date.now()-t0<4000)await new Promise(r=>setTimeout(r,100));
+ if(!syncing)await Promise.race([syncNow(),new Promise(r=>setTimeout(r,4000))]);
+}
+async function doLogin(){
+ if(location.protocol!=='file:'&&!M.lastSync)return;
+ const uid0=$('lu').value,pin=$('lp').value.trim(),btn=$('lbtn');
+ if(btn){btn.disabled=true;btn.textContent='Checking…'}
+ await freshUsers();
+ const b2=$('lbtn');if(b2){b2.disabled=false;b2.textContent='Sign in'}
+ const u=D.users.find(x=>x.id===uid0&&x.active!==false);
+ if(!u||u.pin!==hp(pin)){const le=$('le');if(le)le.textContent='Wrong PIN. Try again.';const lp=$('lp');if(lp){lp.value='';lp.focus()}return}
  ME=u;try{sessionStorage.setItem('glu',u.id)}catch(e){}
  page='dashboard';F=null;log('Login',u.name,'');
- if(u.role==='admin'&&S.autoBackup&&M.lastBackupDay!==ymd())doBackup(true);
+ if(rl(u)==='admin'&&S.autoBackup&&M.lastBackupDay!==ymd())doBackup(true);
  render();
 }
 function logout(){log('Logout',ME.name,'');ME=null;F=null;try{sessionStorage.removeItem('glu')}catch(e){}render()}
@@ -814,6 +830,7 @@ async function init(){
  for(const s of ['doctors','tests','bills','patients','users','audit','tokens'])D[s]=await idbAll(s);
  const st=await idbAll('settings');S=Object.assign(defaultSettings(),st[0]||{});
  const mt=await idbAll('meta');M=Object.assign({id:'meta',counters:{},dirty:{},lastPull:0,lastBackup:0,seeded:false,lastSync:0},mt[0]||{});
+ if(M.syncV!==2){M.syncV=2;M.lastPull=0;saveMeta()}
  if(!M.seeded&&!D.users.length)seed();else if(!M.seeded){M.seeded=true;saveMeta()}
  if(!M.labSeeded){M.labSeeded=true;if(D.users.length&&!D.users.some(u=>u.role==='lab'))put('users',{id:'u-lab',name:'LAB',role:'lab',pin:hp('2222'),active:true});saveMeta()}
  saveSettings();
